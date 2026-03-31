@@ -2,6 +2,7 @@
 name = "slipstream-proxy-aggregator"
 version = "1.0.0"
 edition = "2021"
+authors = ["imanoracle <imanoracle@users.noreply.github.com>"]
 
 [dependencies]
 tokio = { version = "1.37.0", features = ["full"] }

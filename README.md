@@ -58,3 +58,8 @@ While this framework produces unparalleled extraction speed in fully restricted 
 
 2. **OS File-Descriptor Clamping:**
    Because this physically clones subprocess engines iteratively natively, booting more than ~20 to 30 resolvers globally across standard MacOS/Linux networks might trigger traditional unprivileged file descriptor logic limits natively (`Too many open files`). Keep the resolver list extremely strict to the most reliable 4-8 physical routes realistically matching your backend processing limits.
+
+---
+
+## 👥 Contributors
+- **[@imanoracle](https://github.com/imanoracle)** – *Primary Architect & Contributor*

@@ -25,7 +25,10 @@ struct Args {
     instances: usize,
 
     #[arg(short = 'd', long)]
-    domain: String,
+    domain: Option<String>,
+
+    #[arg(long)]
+    domain_file: Option<PathBuf>,
 
     #[arg(short = 'l', long, default_value_t = 9000)]
     tcp_listen_port: u16,
@@ -33,7 +36,6 @@ struct Args {
 
 #[derive(Debug, Clone)]
 struct InstanceState {
-    id: usize,
     port: u16,
     ip: String,
     status: &'static str,
@@ -126,6 +128,7 @@ async fn spawn_instance(
     idx: usize,
     port: u16,
     ip: String,
+    domain: String,
     args: Args,
     states: Arc<RwLock<Vec<InstanceState>>>,
 ) {
@@ -138,7 +141,7 @@ async fn spawn_instance(
 
         let mut child = Command::new(&args.client_bin)
             .arg("--domain")
-            .arg(&args.domain)
+            .arg(&domain)
             .arg("--tcp-listen-port")
             .arg(port.to_string())
             .arg("--resolver")
@@ -161,7 +164,7 @@ async fn spawn_instance(
                 guard[idx].status = "❌ ERR/DROP";
                 guard[idx].ready = false;
                 
-                // CRITICAL FIX: Kill the stalled connection so the loop automatically restarts it in 5 seconds!
+                // CRITICAL FIX: Kill the stalled connection so the loop automatically restarts it
                 let _ = child.kill().await;
                 break;
             }
@@ -182,7 +185,13 @@ async fn dashboard_loop(states: Arc<RwLock<Vec<InstanceState>>>, lb_port: u16) {
     loop {
         sleep(Duration::from_secs(2)).await;
 
-        print!("\x1B[H\x1B[J"); // clear screen
+        // The explicit crossterm matrix dynamically forces exact ANSI UI layouts identically globally (Mac/Linux/Windows)
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::MoveTo(0, 0)
+        );
+        
         println!("🚀 SLIPSTREAM RUST AGGREGATOR | LB: {}", lb_port);
 
         let mut ready_count = 0;
@@ -236,42 +245,125 @@ async fn dashboard_loop(states: Arc<RwLock<Vec<InstanceState>>>, lb_port: u16) {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let mut ips = Vec::new();
 
+    // 1. Gather all domains (from CLI arg + domain_file)
+    let mut candidate_domains = Vec::new();
+    if let Some(d) = &args.domain {
+        candidate_domains.push(d.clone());
+    }
+    if let Some(path) = &args.domain_file {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                let text = line.trim();
+                if !text.is_empty() {
+                    candidate_domains.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    if candidate_domains.is_empty() {
+        eprintln!("Error: No domains provided! Pass --domain or --domain-file");
+        return;
+    }
+
+    // 2. Gather all resolvers (from CLI arg + resolver_file)
+    let mut raw_resolvers = Vec::new();
     if let Some(r) = &args.resolver {
-        ips.push(r.clone());
+        raw_resolvers.push(r.clone());
     }
     if let Some(path) = &args.resolver_file {
         if let Ok(content) = std::fs::read_to_string(path) {
             for line in content.lines() {
                 let text = line.trim();
                 if !text.is_empty() {
-                    ips.push(text.to_string());
+                    raw_resolvers.push(text.to_string());
                 }
             }
         }
     }
 
-    let mut final_ips = Vec::new();
-    for ip in ips {
-        for _ in 0..args.instances {
-            final_ips.push(ip.clone());
+    if raw_resolvers.is_empty() {
+        eprintln!("Error: No resolvers provided!");
+        return;
+    }
+
+    // 3. For each unique resolver, literally test candidate domains identically to actual connections
+    //    We explicitly find the first working domain for each resolver natively.
+    println!("🔍 Synchronously tracking & physical testing pairs natively...");
+    let mut verified_pairs: Vec<(String, String)> = Vec::new();
+
+    for res_ip in &raw_resolvers {
+        let mut found = false;
+        
+        for dom in &candidate_domains {
+            println!("   -> Booting Subprocess Test: resolver {} mapping to domain {}", res_ip, dom);
+            let mut child = Command::new(&args.client_bin)
+                .arg("--domain").arg(dom)
+                .arg("--tcp-listen-port").arg("22000") // Dynamic arbitrary test port
+                .arg("--resolver").arg(format!("{}:53", res_ip))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("Failed to spawn native test client");
+
+            let stdout = child.stdout.take().unwrap();
+            let mut reader = BufReader::new(stdout).lines();
+            
+            let mut works = false;
+            let result = tokio::time::timeout(Duration::from_secs(6), async {
+                while let Ok(Some(line)) = reader.next_line().await {
+                    if line.contains("Connection ready") {
+                        return true;
+                    } else if line.contains("1044") || line.contains("unavailable") || line.contains("reset event") {
+                        return false;
+                    }
+                }
+                false
+            }).await;
+
+            let _ = child.kill().await; // Kill test process
+            let _ = child.wait().await;
+
+            if let Ok(true) = result {
+                works = true;
+            }
+
+            if works {
+                println!("   ✅ SUCCESS: {} verified accessible via {}", dom, res_ip);
+                verified_pairs.push((res_ip.clone(), dom.clone()));
+                found = true;
+                break; // Stop testing remaining domains "find first working one"
+            } else {
+                println!("   ❌ DROP: {} is blocked/dead via {}", dom, res_ip);
+            }
+        }
+        
+        if !found {
+            println!("⚠️ Resolver {} completely dropped (ALL candidate domains natively blocked or dead!).", res_ip);
         }
     }
 
-    if final_ips.is_empty() {
-        eprintln!("Error: No resolvers provided!");
+    if verified_pairs.is_empty() {
+        eprintln!("🔥 CRITICAL: Zero valid connection paths survived DPI extraction!");
         return;
     }
 
     let mut initial_states = Vec::new();
     let mut current_port = 11000;
+    
+    // We clone the verified pairs exactly `args.instances` times.
+    let mut final_assignments = Vec::new();
+    for (res_ip, dom) in &verified_pairs {
+        for _ in 0..args.instances {
+            final_assignments.push((res_ip.clone(), dom.clone()));
+        }
+    }
 
-    for (i, ip) in final_ips.iter().enumerate() {
+    for (i, (res_ip, _dom)) in final_assignments.iter().enumerate() {
         initial_states.push(InstanceState {
-            id: i,
             port: current_port,
-            ip: ip.clone(),
+            ip: res_ip.clone(), // We log their resolver IP on dashboard natively
             status: "Init",
             ready: false,
             conns: 0,
@@ -285,13 +377,12 @@ async fn main() {
 
     let states = Arc::new(RwLock::new(initial_states));
 
-    for i in 0..final_ips.len() {
-        let ip = final_ips[i].clone();
+    for (i, (res_ip, dom)) in final_assignments.clone().into_iter().enumerate() {
         let args_clone = args.clone();
         let states_clone = states.clone();
         let port = 11000 + (i as u16);
-        tokio::spawn(spawn_instance(i, port, ip, args_clone, states_clone));
-        // Securely stagger connections natively so endpoints like OpenDNS don't rate-limit simultaneous hits
+        tokio::spawn(spawn_instance(i, port, res_ip, dom, args_clone, states_clone));
+        // Stagger connections
         sleep(Duration::from_millis(500)).await;
     }
 

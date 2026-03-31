@@ -1,4 +1,4 @@
-# Slipstream Multipath Aggregator 🚀
+# Slipstream Multipath Aggregator 
 
 [![Rust](https://img.shields.io/badge/Rust-1.74+-orange.svg)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/Status-Optimized-brightgreen.svg)]()
@@ -25,7 +25,7 @@ By intentionally instantiating identical parallel tunnels across specifically ma
 Compile directly from the official repository. We aggressively recommend passing `--release` to leverage the custom macro LTO stripping optimizations configured inside `Cargo.toml`.
 
 ```bash
-git clone https://github.com/your-username/slipstream-proxy-aggregator
+git clone https://github.com/imanoracle/slipstream-proxy-aggregator
 cd slipstream-proxy-aggregator
 cargo build --release
 ```
@@ -36,9 +36,11 @@ cargo build --release
 ./target/release/slipstream-proxy-aggregator \
   --client-bin /path/to/my-proxy-executable \
   --resolver-file custom_resolvers.txt \
-  --domain my_remote_endpoint.xyz \
+  --domain-file available_payloads.txt \
   -l 9080
 ```
+
+*(You can specifically pass `--domain-file` containing a list of backup Subdomains/Payloads. The Aggregator will physically spawn a temporary native Subprocess test to physically identify which domains successfully bypass Active DPI drops per-Resolver!)*
 
 *(You can intentionally declare the exact identical ISP inside `custom_resolvers.txt` multiple times on sequential lines. The Aggregator does not blindly deduplicate lines. If you paste `8.8.8.8` exactly 5 times, it mathematically drives precisely 5 physical SOCKS nodes right into Google's core server array dynamically.)*
 
